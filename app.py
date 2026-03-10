@@ -1,46 +1,87 @@
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
-os.environ["TF_NUM_INTEROP_THREADS"] = "1"
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 import streamlit as st
-import yfinance as yf
-import numpy as np
 import pandas as pd
+import yfinance as yf
 import pickle
-from tensorflow.keras.models import load_model
 
-st.title("📈 Stock Price Predictor")
+st.title("📈 Stock Return Prediction App")
 
-# load model and scaler
-model = load_model("stock_model.keras")
-scaler = pickle.load(open("scaler.pkl","rb"))
+st.write("Enter a stock ticker to predict the next-day return.")
 
-stock = st.text_input("Enter Stock Symbol", "AAPL")
+# User input
+ticker = st.text_input(
+    "Stock Ticker (Example: AAPL, TSLA, RELIANCE.NS)",
+    "AAPL"
+)
 
-if st.button("Predict Future Prices"):
+# Load trained model
+with open("models/linear_regression_model.pkl", "rb") as f:
+    model = pickle.load(f)
 
-    data = yf.download(stock, start="2015-01-01")
+if st.button("Predict"):
 
-    st.subheader("Recent Stock Data")
-    st.write(data.tail())
+    # Download stock data
+    data = yf.download(ticker, period="1y")
 
-    st.line_chart(data['Close'])
+    if data.empty:
+        st.error("Invalid ticker or no data available.")
+    else:
 
-    features = data[['Open','High','Low','Close','Volume']]
+        df = data.copy()
 
-    scaled_data = scaler.fit_transform(features)
+        # -------- Feature Engineering --------
 
-    last_60 = scaled_data[-60:]
-    X_input = np.array([last_60])
+        df["MA10"] = df["Close"].rolling(10).mean()
+        df["MA50"] = df["Close"].rolling(50).mean()
 
-    prediction = model.predict(X_input)
+        df["lag1"] = df["Close"].shift(1)
+        df["lag2"] = df["Close"].shift(2)
+        df["lag3"] = df["Close"].shift(3)
 
-    pred_full = np.zeros((1,5))
-    pred_full[:,3] = prediction
+        df["return"] = df["Close"].pct_change()
+        df["volatility"] = df["return"].rolling(10).std()
 
-    predicted_price = scaler.inverse_transform(pred_full)[0][3]
+        # -------- RSI Calculation --------
 
-    st.subheader("Predicted Next Day Price")
-    st.write(f"${predicted_price:.2f}")
+        delta = df["Close"].diff()
+
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+
+        rs = avg_gain / avg_loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+
+        df = df.dropna()
+
+        latest = df.iloc[-1]
+
+        # -------- Model Input --------
+
+        input_data = pd.DataFrame({
+            "lag1":[latest["lag1"]],
+            "lag2":[latest["lag2"]],
+            "lag3":[latest["lag3"]],
+            "MA10":[latest["MA10"]],
+            "MA50":[latest["MA50"]],
+            "volume":[latest["Volume"]],
+            "volatility":[latest["volatility"]],
+            "RSI":[latest["RSI"]]
+        })
+
+        # -------- Prediction --------
+
+        prediction = model.predict(input_data)[0]
+
+        st.subheader("Prediction Result")
+
+        if prediction > 0:
+            st.success(f"Predicted Return: {prediction:.4f} 📈 Bullish")
+        else:
+            st.warning(f"Predicted Return: {prediction:.4f} 📉 Bearish")
+
+        # -------- Stock Chart --------
+
+        st.subheader("Stock Price Chart (Last 1 Year)")
+        st.line_chart(df["Close"])
